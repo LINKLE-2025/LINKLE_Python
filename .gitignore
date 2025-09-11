@@ -1,0 +1,36 @@
+# 환경 변수 파일 (민감 정보)
+.env
+.env.local
+.env.*.local
+
+# HTTPS 인증서 (mkcert 등으로 발급한 로컬 인증서)
+*.pem
+*.key
+*.crt
+
+# Python 관련
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+
+# Jupyter 및 기타 캐시/로그
+.ipynb_checkpoints/
+.DS_Store
+*.log
+
+# 가상환경 폴더 (이름에 따라 달라질 수 있음)
+venv/
+env/
+.venv/
+ENV/
+
+# 테스트/개발용 임시 파일
+*.db
+*.tmp
+*.bak
+
+# IDE 관련 설정 파일 (VSCode, PyCharm 등)
+.vscode/
+.idea/
