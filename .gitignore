@@ -14,6 +14,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.sqlite3
+*.ipynb
 
 # Jupyter 및 기타 캐시/로그
 .ipynb_checkpoints/
