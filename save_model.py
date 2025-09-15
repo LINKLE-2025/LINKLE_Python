@@ -1,5 +1,9 @@
-# train_loop.py 파일에서 일정 주기마다 학습 실행
-def retrain_model():
+def retrain_model(new_user_id=None, use_api_until: int = 5000):
+    """
+    LightFM 모델 재학습
+    - 초기에는 user_api / linker_api / participate_api + 실제 user 테이블을 함께 학습
+    - 일정 유저 수 이상 도달하면(user_id > use_api_until) 실제(user) 데이터만 사용
+    """
     import os
     import pandas as pd
     from sqlalchemy import create_engine
@@ -7,7 +11,7 @@ def retrain_model():
     from lightfm import LightFM
     from lightfm.data import Dataset
     import joblib
-    
+
     # 환경 변수 로딩
     load_dotenv(".env")
     load_dotenv(f".env.{os.getenv('FLASK_ENV', 'development')}.local", override=True)
@@ -18,35 +22,31 @@ def retrain_model():
         f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
     )
 
-    # 데이터 로드
+    # 실제 데이터
+    user_true = pd.read_sql('SELECT * FROM user', con=engine)
+    linker_true = pd.read_sql('SELECT * FROM linker', con=engine)
+    participate_true = pd.read_sql('SELECT * FROM participate', con=engine)
 
-    # 테스트용 더미 데이터 로드
-    user_table_api = pd.read_sql('SELECT * FROM user_api', con=engine)
-    linker_table_api = pd.read_sql('SELECT * FROM linker_api', con=engine)
-    participate_table_api = pd.read_sql('SELECT * FROM participate_api', con=engine)
+    # API(더미) 데이터
+    user_api = pd.read_sql('SELECT * FROM user_api', con=engine)
+    linker_api = pd.read_sql('SELECT * FROM linker_api', con=engine)
+    participate_api = pd.read_sql('SELECT * FROM participate_api', con=engine)
 
-    # 실제 고객 데이터 로드
-    user_table_true = pd.read_sql('SELECT * FROM user', con=engine)
-    linker_table_true = pd.read_sql('SELECT * FROM linker', con=engine)
-    participate_table_true = pd.read_sql('SELECT * FROM participate', con=engine)
-
-    # 실제 참여 데이터 건수 기준으로 분기
-    if len(participate_table_true) > len(participate_table_api):
-        user_table = user_table_true
-        linker_table = linker_table_true
-        participate_table = participate_table_true
+    # 유저 수 기준으로 실제만 쓸지, 섞어서 쓸지 결정
+    if user_true["user_id"].max() > use_api_until:
+        user_table = user_true
+        linker_table = linker_true
+        participate_table = participate_true
     else:
-        user_table = pd.concat([user_table_true, user_table_api], ignore_index=True)
-        linker_table = pd.concat([linker_table_true, linker_table_api], ignore_index=True)
-        participate_table = pd.concat([participate_table_true, participate_table_api], ignore_index=True)
+        user_table = pd.concat([user_true, user_api], ignore_index=True)
+        linker_table = pd.concat([linker_true, linker_api], ignore_index=True)
+        participate_table = pd.concat([participate_true, participate_api], ignore_index=True)
 
-    
     # LightFM 데이터셋 구축
     dataset = Dataset()
-    dataset.fit(users=user_table_api['user_id'], items=linker_table_api['linker_id'])
-
+    dataset.fit(users=user_table['user_id'], items=linker_table['linker_id'])
     (interactions, _) = dataset.build_interactions([
-        (row['user_id'], row['linker_id']) for _, row in participate_table_api.iterrows()
+        (row['user_id'], row['linker_id']) for _, row in participate_table.iterrows()
     ])
 
     # 모델 학습
