@@ -7,52 +7,56 @@ from sqlalchemy import create_engine
 from sklearn.decomposition import TruncatedSVD
 from dotenv import load_dotenv
 
-# .env 파일 로드
-# DB 정보를 .env 파일로 관리하여 보안 강화
-# 환경 감지
+# 환경 변수 로딩
 env = os.getenv("FLASK_ENV", "development")
-
-# 기본 .env
 load_dotenv(".env")
-
-# 환경별 파일
 load_dotenv(f".env.{env}", override=True)
 load_dotenv(f".env.{env}.local", override=True)
 
-# Flask 앱 생성
+# Flask 앱 생성 및 CORS 설정
 app = Flask(__name__)
+CORS(app, origins=os.getenv("ALLOWED_ORIGINS", "*").split(","), supports_credentials=True,
+     allow_headers=["Content-Type", "Authorization"], methods=["GET", "POST", "OPTIONS"])
 
-# CORS 설정
-# .env에서 ALLOWED_ORIGINS를 가져와 허용
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-CORS(app, origins=allowed_origins)
+# DB 연결
+engine = create_engine(
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
+    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+)
 
-# 환경변수로부터 값 읽기
-db_user = os.getenv('DB_USER')
-db_password = os.getenv('DB_PASSWORD')
-db_host = os.getenv('DB_HOST')
-db_port = os.getenv('DB_PORT')
-db_name = os.getenv('DB_NAME')
-
-# SQLAlchemy 엔진 생성 (pymysql 사용)
-engine = create_engine(f'mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}')
-
-# 학습 테이블 DB에서 불러오기 -> DataFrame 형태
+# DB에서 데이터 로딩
 user_table = pd.read_sql('SELECT * FROM USER', con=engine)
 linker_table = pd.read_sql('SELECT * FROM LINKER', con=engine)
 participate_table = pd.read_sql('SELECT * FROM PARTICIPATE', con=engine)
 
-def get_top_address_detail(user_id: int, engine) -> str | None:
+# 유저-링커 행렬 생성 및 SVD 학습
+user_item_matrix = pd.crosstab(participate_table['user_id'], participate_table['linker_id'])
+svd = TruncatedSVD(n_components=10, random_state=42)
+user_factors = svd.fit_transform(user_item_matrix)
+item_factors = svd.components_.T
+predicted_df = pd.DataFrame(np.dot(user_factors, item_factors.T),
+                            index=user_item_matrix.index,
+                            columns=user_item_matrix.columns)
+
+# 유사 사용자 기반 가중치 계산
+def get_similar_user_preference(user_id):
+    target = user_table[user_table['user_id'] == user_id]
+    if target.empty:
+        return {}
+
+    age, gender = target.iloc[0][['age', 'gender']]
+    sim_users = user_table[(user_table['age'] == age) & (user_table['gender'] == gender)]['user_id']
+    sim_parts = participate_table[participate_table['user_id'].isin(sim_users)]
+    return sim_parts['linker_id'].value_counts(normalize=True).to_dict()
+
+# 주소 추출
+def get_top_address_detail(user_id):
     query = """
     SELECT sub.address_detail
     FROM (
-        SELECT 
-            l.address_detail,
-            COUNT(*) AS cnt,
-            MAX(p.participated_date) AS latest_date
+        SELECT l.address_detail, COUNT(*) AS cnt, MAX(p.participated_date) AS latest_date
         FROM PARTICIPATE p
-        INNER JOIN LINKER l
-            ON p.linker_id = l.linker_id
+        INNER JOIN LINKER l ON p.linker_id = l.linker_id
         WHERE p.user_id = %(user_id)s
         GROUP BY l.address_detail
     ) sub
@@ -60,93 +64,86 @@ def get_top_address_detail(user_id: int, engine) -> str | None:
     LIMIT 1;
     """
     df = pd.read_sql(query, con=engine, params={"user_id": user_id})
-    if df.empty:
-        return None
-    return df.iloc[0]['address_detail']
+    return df.iloc[0]['address_detail'] if not df.empty else None
 
-
-# 유저-링커 행렬 생성
-# crosstab을 활용하여 배열에 대한 단순 교차표를 만든다.
-user_item_matrix = pd.crosstab(participate_table['user_id'], participate_table['linker_id'])
-
-# SVD(특이값 분해, Singular Value Decomposition) 모델 활용
-# 행렬 분해 방법 중 하나로 매우 많은 feature를 가진 고차원 행렬을 저차원 행렬로 분리하는 기법이다.
-svd = TruncatedSVD(n_components=10, random_state=42)
-user_factors = svd.fit_transform(user_item_matrix)
-item_factors = svd.components_.T
-
-# 예측 점수 행렬
-predicted_ratings = np.dot(user_factors, item_factors.T)
-predicted_df = pd.DataFrame(predicted_ratings,
-                            index=user_item_matrix.index,
-                            columns=user_item_matrix.columns)
-
-# 중요도 설정시 나이대와 성별을 가지고 가중치 부여를 위한 작업
-# 동일한 나이대와 성별을 가진 사용자들이 선호한 링커 정보를 기반으로
-# 현재 사용자와 유사한 선호 경향에 대한 가중치 반환
-def get_similar_user_preference(user_id, user_table, participate_table):
-    target = user_table[user_table['user_id'] == user_id]
-    if target.empty:
-        return {}
-    age = target.iloc[0]['age']
-    gender = target.iloc[0]['gender']
-    # 같은 성별+나이대 유저들
-    sim_users = user_table[(user_table['age'] == age) & (user_table['gender'] == gender)]['user_id']
-    sim_parts = participate_table[participate_table['user_id'].isin(sim_users)]
-    return sim_parts['linker_id'].value_counts(normalize=True).to_dict()
-
-# 전체적인 작업 진행
-# SVD기반 점수 + 사용자 선호도 + 지역 필터링
-def recommend_linkers_hybrid_local(user_id, address_detail, top_n=5):
+# 하이브리드 추천 함수
+def recommend_linkers(user_id, address_detail, top_n=20):
     if user_id not in predicted_df.index:
         return []
 
-    # 1) SVD 점수
     scores = predicted_df.loc[user_id].copy()
 
-    # 2) 이미 참여한 링커 제거
+    # 이미 참여한 항목 제외
     already = user_item_matrix.loc[user_id][user_item_matrix.loc[user_id] > 0].index.tolist()
     scores.drop(labels=already, inplace=True, errors='ignore')
 
-    # 3) 성별/나이대 가중치 반영
-    weights = get_similar_user_preference(user_id, user_table, participate_table)
+    # 가중치 반영
+    weights = get_similar_user_preference(user_id)
     for lid in scores.index:
         scores.loc[lid] += weights.get(lid, 0)
 
-    # 4) 지역 필터
+    # 지역 필터
     local_ids = linker_table[linker_table['address_detail'] == address_detail]['linker_id']
     scores = scores[scores.index.isin(local_ids)]
+
     if scores.empty:
         return []
 
-    # 5) Top-N
-    top_ids = scores.sort_values(ascending=False).head(top_n).index.tolist()
+    return scores.sort_values(ascending=False).head(top_n).index.tolist()
 
-    # linker_id 리스트만 반환
-    return top_ids
+# Precision@K
+def precision_at_k(recommended_ids, true_ids, k):
+    if not recommended_ids:
+        return 0.0
+    return len(set(recommended_ids[:k]) & set(true_ids)) / k
 
-# 추천 API 엔드포인트
+# 평가 함수
+def evaluate_model(user_ids, k=20):
+    precision_scores = []
+
+    for user_id in user_ids:
+        all_parts = participate_table[participate_table['user_id'] == user_id]
+        if len(all_parts) < 2:
+            continue
+
+        test_parts = all_parts.sample(frac=0.4, random_state=42)
+        true_ids = test_parts['linker_id'].tolist()
+        address = get_top_address_detail(user_id)
+        recommended_ids = recommend_linkers(user_id, address, top_n=k)
+
+        print(f"[user_id: {user_id}] 추천: {recommended_ids} / 정답: {true_ids}")  # ✅ 여기에 위치해야 함
+
+        if true_ids and recommended_ids:
+            precision_scores.append(precision_at_k(recommended_ids, true_ids, k))
+
+    return np.mean(precision_scores) if precision_scores else 0.0
+
+
+# 추천 API
 @app.route('/recommend', methods=['GET'])
 def recommend():
     try:
         user_id = int(request.args.get('user_id'))
-        top_n = 5
-
-        address = request.args.get('address_detail')
-        if not address:
-            address = get_top_address_detail(user_id, engine)
-
-        results = recommend_linkers_hybrid_local(user_id, address, top_n) or []
-        return jsonify({"linker_ids": results}), 200  # ✅ 항상 동일 스키마
+        address = request.args.get('address_detail') or get_top_address_detail(user_id)
+        results = recommend_linkers(user_id, address)
+        return jsonify({"linker_ids": results}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# 정확도 평가 API
+@app.route('/evaluate', methods=['GET'])
+def evaluate():
+    try:
+        sample_users = user_table['user_id'].sample(100, random_state=42)
+        precision = evaluate_model(sample_users)
+        
 
+        return jsonify({"precision_at_5": round(precision, 4)}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
-
-# HTTPS 설정 및 서버 실행
+# 서버 실행
 if __name__ == '__main__':
     ssl_cert = os.getenv("SSL_CERT_PATH")
     ssl_key = os.getenv("SSL_KEY_PATH")
-
-    app.run(host='0.0.0.0', port=443, ssl_context=(ssl_cert, ssl_key))
+    app.run(host="0.0.0.0", port=443)  # SSL 없이 실행 시 ssl_context=(ssl_cert, ssl_key) 주석 해제
