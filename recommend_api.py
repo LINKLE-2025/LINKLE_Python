@@ -99,20 +99,37 @@ def get_top_address_detail(user_id):
 
 
 # 5) 추천 함수
-def recommend_linkers(user_id, address_detail=None, top_n=5, exclude_already=True):
-    
-    # 신규 유저 (cold-start) → 인기 기반 추천
+def recommend_linkers(user_id, address_detail=None, top_n=20, exclude_already=True):
+    # 추천 결과는 운영용 linker_true 기준으로 필터링
+    valid_linker_ids = set(pd.read_sql("SELECT linker_id FROM linker", con=engine)["linker_id"])
+
+    # 주소 기반 필터링
+    # 예시: 1차 서울특별시 종로구 / 2차 서울특별시
+    if address_detail:
+        parts = address_detail.split()
+        if len(parts) >= 2:
+            sido = parts[0]  # 예: 경기도
+            sigungu = parts[1]  # 예: 의왕시
+            prefix = f"{sido} {sigungu}"
+            local_ids = linker_table[linker_table["address_detail"].str.startswith(prefix)]["linker_id"]
+        else:
+            # 시도만 있을 경우
+            local_ids = linker_table[linker_table["address_detail"].str.startswith(parts[0])]["linker_id"]
+    else:
+        local_ids = linker_table["linker_id"]
+
+    # 신규 유저 (cold-start) → 지역 기반 인기 추천
     # 아직 참여 데이터가 없는 유저는 학습 기반 예측이 불가하므로,
-    # 전체 참여 기록(participate_table)을 기준으로 인기 링커 Top-N을 추천
+    # 전체 참여 기록(participate_table)을 기준으로 해당 지역의 인기 링커 Top-N을 추천
     if user_id not in user_id_map or participate_table[participate_table["user_id"] == user_id].empty:
         popular_linkers = (
-            participate_table["linker_id"]
+            participate_table[participate_table["linker_id"].isin(local_ids)]["linker_id"]
             .value_counts()
             .head(top_n)
             .index
             .tolist()
         )
-        return popular_linkers
+        return [lid for lid in popular_linkers if lid in valid_linker_ids]
 
     # 내부 ID 변환
     user_internal_id = user_id_map[user_id]
@@ -134,14 +151,8 @@ def recommend_linkers(user_id, address_detail=None, top_n=5, exclude_already=Tru
         "score": scores
     })
 
-    # 주소 기반 필터링
-    # 예시: 1차 서울특별시 종로구/ 2차 서울특별시
-    if address_detail:
-        local_ids = linker_table[linker_table["address_detail"] == address_detail]["linker_id"]
-        if local_ids.empty and " " in address_detail:
-            sido = address_detail.split()[0]
-            local_ids = linker_table[linker_table["address_detail"].str.startswith(sido)]["linker_id"]
-        score_df = score_df[score_df["linker_id"].isin(local_ids)]
+    # 주소 기반 필터링 (위에서 계산한 local_ids 기반 필터링)
+    score_df = score_df[score_df["linker_id"].isin(local_ids)]
 
     # 이미 참여한 링커 제외
     if exclude_already:
@@ -158,7 +169,12 @@ def recommend_linkers(user_id, address_detail=None, top_n=5, exclude_already=Tru
         .head(top_n)["linker_id"]
         .tolist()
     )
+
+    # 추천 결과는 운영용 linker만 사용 (linker_true 기준 필터링)
+    top_ids = [lid for lid in top_ids if lid in valid_linker_ids]
+
     return top_ids
+
 
 
 # 6) 평가 함수
@@ -203,6 +219,8 @@ def recommend():
         address = request.args.get("address_detail")
         if not address:
             address = get_top_address_detail(user_id)
+
+        print(f"📍 address_detail: {address}")
         results = recommend_linkers(user_id, address)
         return jsonify({"linker_ids": results}), 200
     except Exception as e:

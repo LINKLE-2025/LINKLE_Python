@@ -183,6 +183,10 @@ def hybrid_recommend(user_id, top_n=10, weights=None, context=None):
         weights["itemcf"]  * itemcf_scores.add(0, fill_value=0) +
         weights["cbf"]     * cbf_scores.add(0, fill_value=0)
     )
+    # 추천 결과 필터링: 실제 운영 DB에 존재하는 linker_id만 사용
+    valid_linker_ids = context.get("valid_linker_ids")  # ← 이 키로 운영 ID 세트를 전달
+    if valid_linker_ids is not None:
+        final_scores = final_scores[final_scores.index.isin(valid_linker_ids)]
 
     return final_scores.sort_values(ascending=False).head(top_n).index.tolist()
 
@@ -208,6 +212,9 @@ def retrain_model(new_user_id=None, use_api_until: int = 5000, cold_start_mode: 
     user_api = pd.read_sql('SELECT * FROM user_api', con=engine)
     linker_api = pd.read_sql('SELECT * FROM linker_api', con=engine)
     participate_api = pd.read_sql('SELECT * FROM participate_api', con=engine)
+
+    valid_linker_ids = set(linker_true["linker_id"])
+
 
     # 인원수를 설정하여 유저 아이디가 use_api_until에 설정한 값이 넘거가게 되면 신규 유저의 정보만을 가지고 진행
     if user_true["user_id"].max() > use_api_until:
@@ -319,9 +326,9 @@ def retrain_model(new_user_id=None, use_api_until: int = 5000, cold_start_mode: 
     train_p = precision_at_k(model, train, user_features=user_features, item_features=item_features, k=5).mean()
     test_p = precision_at_k(model, test, user_features=user_features, item_features=item_features, k=5).mean()
     test_auc = auc_score(model, test, user_features=user_features, item_features=item_features).mean()
-    # print(f"\n📊 Precision@5 (Train): {train_p:.4f}")
-    # print(f"📊 Precision@5 (Test) : {test_p:.4f}")
-    # print(f"📊 AUC (Test) : {test_auc:.4f}")
+    print(f"\n📊 Precision@5 (Train): {train_p:.4f}")
+    print(f"📊 Precision@5 (Test) : {test_p:.4f}")
+    print(f"📊 AUC (Test) : {test_auc:.4f}")
 
     # 저장
     os.makedirs("model", exist_ok=True)
@@ -339,7 +346,8 @@ def retrain_model(new_user_id=None, use_api_until: int = 5000, cold_start_mode: 
         "linker_table": linker_table,
         "participate_table": participate_table,
         "user_features": user_features,
-        "item_features": item_features
+        "item_features": item_features,
+        "valid_linker_ids": valid_linker_ids 
     }, "model/hybrid_context.pkl")
     print("\n LightFM 모델과 Hybrid context 저장 완료.")
 
