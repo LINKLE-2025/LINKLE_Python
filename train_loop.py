@@ -3,28 +3,36 @@ import traceback
 import datetime
 from save_model import retrain_model
 
-# 학습 주기 (1주일)
-SLEEP_INTERVAL = 60 * 60 * 24 * 7
+# 재학습 주기 (현재 5분 / 운영은 1주일 권장)
+SLEEP_INTERVAL = 60 * 5  
 
 # API → 실제 데이터 전환 기준
-USE_API_UNTIL = 5000  # 예: user_id 5000 이하일 때까진 user_api 포함
+USE_API_UNTIL = 5000
 
-def main():
+def log(msg: str):
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # print(f"[{now}] {msg}")
+
+def run_training_loop():
     while True:
         try:
-            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"{now} - 모델 재학습 시작")
+            # log("모델 재학습 시작")
 
-            # 신규 유저 ID를 파라미터로 넘길 수도 있음 (없으면 None)
-            retrain_model(new_user_id=None, use_api_until=USE_API_UNTIL)
+            # 모델 재학습 수행
+            result = retrain_model(use_api_until=USE_API_UNTIL)
+            # log("모델 재학습 완료")
 
-            print(f"{now} - 모델 재학습 완료\n")
+            # 성능 로그 출력
+            # log(f"Precision@5 (Train): {result['train_precision']:.4f}")
+            # log(f"Precision@5 (Test) : {result['test_precision']:.4f}")
+            # log(f"AUC (Test)         : {result['test_auc']:.4f}")
 
         except Exception as e:
-            print(f"에러 발생: {e}")
+            log(f"에러 발생: {e}")
             traceback.print_exc()
 
+        log(f"{SLEEP_INTERVAL}초 후 재학습 대기 중...\n")
         time.sleep(SLEEP_INTERVAL)
 
 if __name__ == "__main__":
-    main()
+    run_training_loop()
