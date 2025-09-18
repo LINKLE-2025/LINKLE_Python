@@ -1,0 +1,31 @@
+FROM python:3.10-slim
+
+# 시스템 패키지 설치 (C 컴파일러 + 수학 라이브러리)
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libopenblas-dev \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 작업 디렉토리 설정
+FROM python:3.10-slim
+
+# 시스템 패키지 설치 (C 컴파일러 + 수학 라이브러리)
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libopenblas-dev \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 작업 디렉토리 설정
+WORKDIR /app
+
+# 파일 복사
+COPY . /app
+
+# Python 패키지 설치
+RUN pip install --upgrade pip
+RUN pip install --no-binary :all: -r requirements.txt
+
+# 서버 실행 (예시: Flask)
+CMD ["python", "main.py"]

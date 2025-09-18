@@ -193,7 +193,7 @@ def hybrid_recommend(user_id, top_n=10, weights=None, context=None):
 
 
 # 모델 재학습
-def retrain_model(new_user_id=None, use_api_until: int = 5000, cold_start_mode: bool = False):
+def retrain_model(new_user_id=None, use_api_until: int = 10000, cold_start_mode: bool = False):
     """
     LightFM + Hybrid 보조 추천기 학습
     """
@@ -240,13 +240,18 @@ def retrain_model(new_user_id=None, use_api_until: int = 5000, cold_start_mode: 
     2. 나이를 0~100 범위로 정리
     3. 성별과 나이를 함께 활용하여 KMeans로 4개 군집으로 분류 (cluster_feature 생성)
     '''
-    user_table["gender"] = user_table["gender"].fillna("unknown")
-    user_table["age"] = pd.to_numeric(user_table["age"], errors="coerce").fillna(0).astype(int).clip(0, 100)
-    user_table["gender_num"] = user_table["gender"].map({"남성": 0, "여성": 1}).fillna(-1)
+    user_table = user_table.copy()  # SettingWithCopyWarning 방지
+    user_table.loc[:, "gender"] = user_table["gender"].fillna("unknown")
+    user_table.loc[:, "age"] = pd.to_numeric(user_table["age"], errors="coerce").fillna(0).astype(int).clip(0, 100)
+    user_table.loc[:, "gender_num"] = user_table["gender"].map({"남성": 0, "여성": 1}).fillna(-1)
 
     scaler = StandardScaler()
     X_cluster = scaler.fit_transform(user_table[["gender_num", "age"]])
-    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
+
+    # n_clusters 동적 조정 (샘플 수보다 클 수 없음)
+    n_samples = len(user_table)
+    n_clusters = min(4, n_samples) if n_samples > 0 else 1
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     user_table["cluster_feature"] = "cluster:" + kmeans.fit_predict(X_cluster).astype(str)
 
     user_table["age_band"] = pd.cut(
@@ -269,8 +274,9 @@ def retrain_model(new_user_id=None, use_api_until: int = 5000, cold_start_mode: 
 
     # 링커 전처리
     # 카테고리/ 링커 참여도(인기도)/ 최근 90일 참여도 feature 생성
-    linker_table["category_id"] = linker_table["category_id"].fillna("unknown").astype(str)
-    linker_table["category_feature"] = "category:" + linker_table["category_id"]
+    linker_table = linker_table.copy()  # SettingWithCopyWarning 방지
+    linker_table.loc[:, "category_id"] = linker_table["category_id"].fillna("unknown").astype(str)
+    linker_table.loc[:, "category_feature"] = "category:" + linker_table["category_id"]
 
     linker_popularity = participate_table.groupby("linker_id").size().reset_index(name="popularity")
     linker_table = pd.merge(linker_table, linker_popularity, on="linker_id", how="left").fillna({"popularity": 0})
@@ -279,7 +285,8 @@ def retrain_model(new_user_id=None, use_api_until: int = 5000, cold_start_mode: 
     ).astype(str)
 
     if "participated_date" in participate_table.columns:
-        participate_table["date"] = pd.to_datetime(participate_table["participated_date"], errors="coerce")
+        participate_table = participate_table.copy()
+        participate_table.loc[:, "date"] = pd.to_datetime(participate_table["participated_date"], errors="coerce")
         recent_cut = pd.Timestamp.now() - pd.Timedelta(days=90)
         recent_pop = participate_table[participate_table["date"] >= recent_cut].groupby("linker_id").size()
         linker_table = linker_table.merge(recent_pop.rename("recent_pop"), on="linker_id", how="left")
@@ -323,9 +330,16 @@ def retrain_model(new_user_id=None, use_api_until: int = 5000, cold_start_mode: 
     model.fit(train, user_features=user_features, item_features=item_features, epochs=70, num_threads=1)
 
     # 평가
-    train_p = precision_at_k(model, train, user_features=user_features, item_features=item_features, k=5).mean()
-    test_p = precision_at_k(model, test, user_features=user_features, item_features=item_features, k=5).mean()
-    test_auc = auc_score(model, test, user_features=user_features, item_features=item_features).mean()
+    '''
+    test 데이터가 없으면 precision/auc 계산이 불가능 → 0.0으로 대체
+    '''
+    if test.getnnz() == 0:
+        train_p, test_p, test_auc = 0.0, 0.0, 0.0
+    else:
+        train_p = precision_at_k(model, train, user_features=user_features, item_features=item_features, k=5).mean()
+        test_p = precision_at_k(model, test, user_features=user_features, item_features=item_features, k=5).mean()
+        test_auc = auc_score(model, test, user_features=user_features, item_features=item_features).mean()
+
     print(f"\n📊 Precision@5 (Train): {train_p:.4f}")
     print(f"📊 Precision@5 (Test) : {test_p:.4f}")
     print(f"📊 AUC (Test) : {test_auc:.4f}")

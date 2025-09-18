@@ -7,7 +7,7 @@ from save_model import retrain_model
 SLEEP_INTERVAL = 60 * 5  
 
 # API → 실제 데이터 전환 기준
-USE_API_UNTIL = 5000
+USE_API_UNTIL = 10000
 
 def log(msg: str):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
